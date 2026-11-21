@@ -1,136 +1,181 @@
+import analytics.QueueAnalytics;
+import analytics.SkillWaitSummary;
+import dao.QueueFlowServiceImpl;
+import entity.Agent;
+import entity.Request;
+import entity.RoutingDecision;
+import entity.Skill;
+import exception.AgentNotFoundException;
+import exception.NoAgentsAvailableException;
+import stream.QueueFlowPipeline;
 
-import entity.*;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 public class Main {
 
     public static void main(String[] args) {
+        QueueFlowServiceImpl service = new QueueFlowServiceImpl();
+        service.addSkill(new Skill(1, "Java"));
+        service.addSkill(new Skill(2, "Python"));
 
-        // 1. Create agents
-        Agent agent1 = new Agent(1, "John", "David", "Available");
-        Agent agent2 = new Agent(2, "Mary", "Joseph", "Available");
+        service.RegisterAgent(new Agent(1, "John", "David", "Available"),
+                Arrays.asList(1));
+        service.RegisterAgent(new Agent(2, "Mary", "Joseph", "Available"),
+                Arrays.asList(2));
 
-        // 2. Create skills
-        Skill skill1 = new Skill(1, "Java");
-        Skill skill2 = new Skill(2, "Python");
+        System.out.println("===== QUEUEFLOW SPRINT 3 DEMO =====");
 
-        // 3. Map agents to their skills
-        List<AgentSkill> agentSkills = new ArrayList<>();
+        Request call = service.SubmitRequest(101, 1, "High", "Call");
+        Request chat = service.SubmitRequest(102, 2, "Medium", "Chat");
 
-        agentSkills.add(new AgentSkill(1, 1, 1, 4));
-        agentSkills.add(new AgentSkill(2, 2, 2, 5));
+        try {
+            List<Request> mixedRequests =
+                    new ArrayList<>(Arrays.asList(call, chat));
+            mixedRequests.sort(Comparator.comparingInt(
+                    Request::getRoutingWeight).reversed());
+            for (Request request : mixedRequests) {
+                Agent assigned = service.RouteRequest(request.getRequestId());
+                System.out.println(request.getChannel() + " request "
+                        + request.getRequestId() + " (routing weight "
+                        + request.getRoutingWeight() + ") routed to "
+                        + assigned.getFirstName());
+            }
 
-        // 4. Create a mixed list of requests
-        List<Request> requests = new ArrayList<>();
+            service.CompleteRequest(call.getRequestId());
+            System.out.println("Completed call " + call.getRequestId()
+                    + "; agent released.");
+        } catch (AgentNotFoundException | NoAgentsAvailableException e) {
+            System.out.println("Service error: " + e.getMessage());
+        }
 
-        requests.add(new ChatRequest(
-                2, 102, 2, "Medium",
-                LocalDateTime.now(), "Queued"
-        ));
+        QueueAnalytics analytics = new QueueAnalytics();
+        System.out.println("\n===== ANALYTICS =====");
+        System.out.println("Available: "
+                + analytics.GetAgentsByStatus(service.getAgents(), "Available")
+                        .stream().map(Agent::getFirstName).toList());
 
-        requests.add(new CallRequest(
-                1, 101, 1, "High",
-                LocalDateTime.now(), "Queued"
-        ));
+        Request slaRequest = service.SubmitRequest(103, 1, "Low", "Chat");
+        slaRequest.setReceivedAt(LocalDateTime.now().minusSeconds(31));
 
-        // 5. Sort requests by routing weight (highest first)
-        requests.sort(
-                Comparator.comparingInt(Request::getRoutingWeight).reversed()
-        );
+        Map<Integer, Long> depth =
+                analytics.GetQueueDepthBySkill(service.getRequests(), service.getSkills());
+        System.out.println("Queue depth: " + depth);
 
-        // 6. Create available agent pool
-        List<Agent> agents = new ArrayList<>();
-        agents.add(agent1);
-        agents.add(agent2);
+        List<Request> breaching = analytics.GetSlaBreachingRequests(
+                service.getRequests(), LocalDateTime.now(),
+                QueueFlowServiceImpl.DEFAULT_SLA_TARGET_SECONDS);
+        System.out.println("SLA breaches: " +
+                breaching.stream().map(Request::getRequestId).toList());
 
-        // 7. Route requests to matching available agents
-        System.out.println("===== QUEUEFLOW ROUTING DEMO =====");
+        List<SkillWaitSummary> worst =
+                analytics.GetWorstWaitSkills(service.getSkills(), service.getRequests(), 2);
+        System.out.println("Worst waits: " + worst);
 
-        int decisionId = 1;
+        System.out.println("\n===== CUSTOM EXCEPTIONS =====");
+        try {
+            service.UpdateAgentAvailability(999, "Available");
+        } catch (AgentNotFoundException e) {
+            System.out.println("Handled: " + e.getMessage());
+        }
 
-        for (Request request : requests) {
+        try {
+            service.RouteRequest(999);
+        } catch (IllegalArgumentException | NoAgentsAvailableException e) {
+            System.out.println("Handled: " + e.getMessage());
+        }
 
-            Agent assignedAgent = null;
+        System.out.println("\n===== SIMULATED STREAM AND CONCURRENT DASHBOARD =====");
+        try (QueueFlowPipeline pipeline = new QueueFlowPipeline(service)) {
+            pipeline.start();
 
-            for (Agent agent : agents) {
+            Future<?> producer = pipeline.produceAsync(200, 4);
+            producer.get();
+            pipeline.consumeAvailable();
+            pipeline.printConcurrentDashboard();
+            pipeline.runSlaSweep();
 
-                if (!agent.getStatus().equalsIgnoreCase("Available")) {
-                    continue;
-                }
+            System.out.println("Bounded queue capacity: "
+                    + (pipeline.getQueueSize()
+                    + pipeline.getQueueRemainingCapacity()));
+            System.out.println("Maximum assignment latency: "
+                    + pipeline.getMaximumAssignmentLatencyMillis() + " ms");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.out.println("Pipeline demonstration interrupted.");
+        } catch (java.util.concurrent.ExecutionException e) {
+            System.out.println("Pipeline error: " + e.getMessage());
+        }
 
-                boolean hasRequiredSkill = false;
+        System.out.println("\n===== LOAD SHAPE DEMONSTRATION =====");
+        QueueFlowServiceImpl loadService = new QueueFlowServiceImpl();
+        loadService.addSkill(new Skill(1, "Java"));
+        loadService.addSkill(new Skill(2, "Python"));
+        for (int i = 1; i <= 40; i++) {
+            loadService.RegisterAgent(
+                    new Agent(i, "Agent " + i, "Worker", "Available"),
+                    Arrays.asList(1, 2));
+        }
 
-                for (AgentSkill mapping : agentSkills) {
-
-                    if (mapping.getAgentId() == agent.getAgentId()
-                            && mapping.getSkillId() == request.getRequiredSkillId()) {
-
-                        hasRequiredSkill = true;
-                        break;
+        try (QueueFlowPipeline loadPipeline = new QueueFlowPipeline(loadService)) {
+            loadPipeline.start();
+            long intervalMillis = TimeUnit.MINUTES.toMillis(1) / 100;
+            Future<?> producer = loadPipeline.produceAtRateAsync(
+                    1000, 100, intervalMillis);
+            Set<Integer> completedRequests = new HashSet<>();
+            long deadline = System.nanoTime()
+                    + TimeUnit.SECONDS.toNanos(70);
+            boolean producerResultChecked = false;
+            while (completedRequests.size() < 100
+                    && System.nanoTime() < deadline) {
+                for (RoutingDecision decision : loadService.getDecisions()) {
+                    if (completedRequests.add(decision.getRequestId())) {
+                        loadService.CompleteRequest(decision.getRequestId());
                     }
                 }
-
-                if (hasRequiredSkill) {
-                    assignedAgent = agent;
-                    break;
+                if (!producerResultChecked && producer.isDone()) {
+                    producer.get();
+                    producerResultChecked = true;
+                }
+                if (completedRequests.size() < 100) {
+                    Thread.sleep(10);
                 }
             }
-
-            if (assignedAgent != null) {
-
-                assignedAgent.setStatus("Busy");
-
-                RoutingDecision decision = new RoutingDecision(
-                        decisionId++,
-                        request.getRequestId(),
-                        assignedAgent.getAgentId(),
-                        LocalDateTime.now(),
-                        0
-                );
-
-                System.out.println("\nRequest ID: " + request.getRequestId());
-                System.out.println("Channel: " + request.getChannel());
-                System.out.println("Routing Weight: " + request.getRoutingWeight());
-                System.out.println("Assigned Agent: "
-                        + assignedAgent.getFirstName());
-                System.out.println("Agent Status: " + assignedAgent.getStatus());
-                System.out.println("Decision ID: " + decision.getDecisionId());
-
-            } else {
-
-                System.out.println("\nRequest ID: " + request.getRequestId()
-                        + " could not be routed.");
+            if (!producerResultChecked) {
+                producer.get();
+                producerResultChecked = true;
             }
+            if (!producerResultChecked || completedRequests.size() != 100) {
+                throw new IllegalStateException(
+                        "The paced 100-request load did not finish in 70 seconds.");
+            }
+            System.out.println("100-request load: assigned="
+                    + loadService.getDecisions().size()
+                    + ", still queued=" + loadPipeline.getQueueSize()
+                    + ", latency samples="
+                    + loadPipeline.getAssignmentLatenciesMillis().size()
+                    + ", maxAssignmentLatency="
+                    + loadPipeline.getMaximumAssignmentLatencyMillis()
+                    + " ms (acceptance limit: < 5000 ms; arrival interval: "
+                    + intervalMillis + " ms)");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(
+                    "Load demonstration interrupted.", e);
+        } catch (java.util.concurrent.ExecutionException
+                 | AgentNotFoundException e) {
+            throw new IllegalStateException(
+                    "Load demonstration failed.", e);
         }
 
-        System.out.println("\n===== FINAL AGENT STATUS =====");
-
-        for (Agent agent : agents) {
-            System.out.println(
-                    agent.getFirstName() + " - " + agent.getStatus()
-            );
-        }
-
-       // 8. Test validation rules
-System.out.println("\n===== VALIDATION TEST =====");
-
-try {
-    AgentSkill invalidMapping = new AgentSkill(3, 1, 1, 6);
-    System.out.println("Invalid mapping created.");
-} catch (IllegalArgumentException e) {
-    System.out.println("Validation error: " + e.getMessage());
-}
-
-try {
-    agent1.setStatus("OnBreak");
-    System.out.println("Invalid status accepted.");
-} catch (IllegalArgumentException e) {
-    System.out.println("Validation error: " + e.getMessage());
-}
-
-System.out.println("\nPolymorphism and routing demo completed!");
+        System.out.println("\nSprint 3 in-memory demo completed.");
     }
 }

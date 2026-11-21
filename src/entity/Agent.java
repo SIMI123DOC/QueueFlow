@@ -6,7 +6,7 @@ public class Agent {
     private int agentId;
     private String firstName;
     private String lastName;
-    private String status;
+    private volatile String status;
 
     // Default constructor
     public Agent() {

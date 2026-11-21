@@ -8,10 +8,10 @@ public abstract class Request {
     private int requestId;
     private int customerId;
     private int requiredSkillId;
-    private String priority;
+    private volatile String priority;
     private String channel;
-    private LocalDateTime receivedAt;
-    private String status;
+    private volatile LocalDateTime receivedAt;
+    private volatile String status;
 
     // Default constructor
     public Request() {
